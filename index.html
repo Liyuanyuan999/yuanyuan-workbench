@@ -115,6 +115,28 @@ img{display:block;max-width:100%}
 }
 .nav-item.active .badge{background:var(--pink-500)}
 
+/* 侧边栏底部同步入口 */
+.sidebar-footer{
+  padding:10px 12px 14px;border-top:1px dashed var(--line);
+  display:flex;align-items:center;justify-content:center;
+}
+.sidebar-footer .sync-entry{
+  width:100%;display:flex;align-items:center;gap:10px;
+  padding:10px 12px;border-radius:var(--radius-sm);
+  background:var(--pink-50);color:var(--pink-600);
+  font-size:13px;font-weight:600;cursor:pointer;
+  transition:all .2s;
+}
+.sidebar-footer .sync-entry:hover{
+  background:linear-gradient(135deg,var(--pink-100),var(--pink-200));
+  box-shadow:0 3px 10px rgba(255,182,193,.3);
+}
+.sidebar-footer .sync-entry .ico{font-size:18px;width:22px;text-align:center}
+.sidebar-footer .sync-entry .status{
+  margin-left:auto;font-size:11px;font-weight:500;
+  padding:3px 8px;border-radius:10px;background:#fff;color:var(--pink-500);
+}
+
 /* ===== 顶部条（移动端） ===== */
 .topbar{
   display:none;align-items:center;justify-content:space-between;
@@ -899,6 +921,13 @@ img{display:block;max-width:100%}
     <div class="nav-list" id="navList">
       <!-- 由JS生成 -->
     </div>
+    <div class="sidebar-footer">
+      <div class="sync-entry" id="sidebarSync" title="云端同步">
+        <span class="ico" id="sidebarSyncIco">🌐</span>
+        <span>云端同步</span>
+        <span class="status" id="sidebarSyncStatus">未开启</span>
+      </div>
+    </div>
   </aside>
 
   <!-- 移动端遮罩 -->
@@ -1128,18 +1157,31 @@ function cloudSync(){
 }
 function updateSyncBtn(status){
   const btn = document.getElementById('topbarSync');
-  if(!btn) return;
+  const side = document.getElementById('sidebarSync');
+  const sideIco = document.getElementById('sidebarSyncIco');
+  const sideStatus = document.getElementById('sidebarSyncStatus');
   const map = {
-    off:    {icon:'🌐', color:'var(--pink-700)', title:'未开启云端同步，点击设置'},
-    syncing:{icon:'🔄', color:'#FF7A95',        title:'同步中…'},
-    synced: {icon:'✅', color:'#7EC8A0',        title:'已同步'},
-    error:  {icon:'⚠️', color:'#E57373',        title:'同步失败，点击重试'}
+    off:    {icon:'🌐', color:'var(--pink-700)', title:'未开启云端同步，点击设置', label:'未开启'},
+    syncing:{icon:'🔄', color:'#FF7A95',        title:'同步中…',                label:'同步中'},
+    synced: {icon:'✅', color:'#7EC8A0',        title:'已同步',                  label:'已同步'},
+    error:  {icon:'⚠️', color:'#E57373',        title:'同步失败，点击重试',      label:'失败'}
   };
   const s = map[status]||map.off;
-  btn.textContent = s.icon;
-  btn.style.color = s.color;
-  btn.title = s.title;
-  btn.dataset.status = status;
+  if(btn){
+    btn.textContent = s.icon;
+    btn.style.color = s.color;
+    btn.title = s.title;
+    btn.dataset.status = status;
+  }
+  if(side){
+    side.title = s.title;
+    side.dataset.status = status;
+    if(sideIco) sideIco.textContent = s.icon;
+    if(sideStatus){
+      sideStatus.textContent = s.label;
+      sideStatus.style.color = s.color;
+    }
+  }
 }
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
 function todayKey(d){const x=d||new Date();return x.toISOString().slice(0,10)}
@@ -3439,6 +3481,8 @@ function init(){
   document.getElementById('topbarImport').onclick=importData;
   // 云端同步
   document.getElementById('topbarSync').onclick=openSyncPanel;
+  const sidebarSyncBtn = document.getElementById('sidebarSync');
+  if(sidebarSyncBtn) sidebarSyncBtn.onclick=openSyncPanel;
   if(localStorage.getItem(SYNC_CODE_KEY)){
     startGistSync();
   }else{
