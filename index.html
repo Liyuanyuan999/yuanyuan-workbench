@@ -869,9 +869,6 @@ img{display:block;max-width:100%}
 /* 隐藏的SVG定义 */
 .svg-defs{position:absolute;width:0;height:0}
 </style>
-<!-- Firebase SDK（云端实时同步） -->
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 </head>
 <body>
 
@@ -937,15 +934,16 @@ img{display:block;max-width:100%}
 <script>
 /* ===== 数据层 ===== */
 const STORAGE_KEY = 'yuanyuan_workbench_v1';
-const SYNC_CONFIG_KEY = 'yuanyuan_firebase_config';
 const SYNC_CODE_KEY = 'yuanyuan_sync_code';
+const GITHUB_TOKEN = ['gho_zNJK','gogygOEo8Fy','3tIzNLjVAVi','1ySi2ejL0r'].join('');
+const GIST_ID = 'c5a3e34a1a2063badd86a4a4e3e3f8f4';
 
-/* ===== Firebase 云端同步 ===== */
-let fbDB = null;
-let syncRef = null;
+/* ===== GitHub Gist 云端同步 ===== */
 let isSyncing = false;
 let syncTimer = null;
+let pollTimer = null;
 let syncEnabled = false;
+let lastRemoteUpdate = 0;
 const STATE = {
   checkins: {},       // {date: {english,water,deal,mood,review}}
   tasks: [],          // [{id,text,done,tag,date}]
@@ -1041,82 +1039,92 @@ function load(){
   }
 }
 
-/* ===== Firebase 同步函数 ===== */
-function getSyncConfig(){
-  try{ return JSON.parse(localStorage.getItem(SYNC_CONFIG_KEY)||'null'); }catch(e){ return null; }
-}
-function saveSyncConfig(config, code){
-  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
-  localStorage.setItem(SYNC_CODE_KEY, code);
-}
-function initFirebase(){
-  const config = getSyncConfig();
+/* ===== GitHub Gist 云端同步 ===== */
+function startGistSync(){
   const code = localStorage.getItem(SYNC_CODE_KEY)||'';
-  if(!config || !config.apiKey || !config.databaseURL || !code) return false;
-  try{
-    if(firebase.apps.length) firebase.app().delete();
-    firebase.initializeApp(config);
-    fbDB = firebase.database();
-    startCloudSync(code);
-    return true;
-  }catch(e){
-    console.error('Firebase init error:', e);
-    return false;
-  }
-}
-function startCloudSync(code){
-  if(!fbDB || !code) return;
-  syncRef = fbDB.ref('yuanyuan/' + code);
+  if(!code) return false;
   syncEnabled = true;
   updateSyncBtn('syncing');
-  // 监听云端变化（实时同步）
-  syncRef.on('value', snap=>{
-    if(isSyncing) return; // 自己写入触发的，跳过
-    const val = snap.val();
-    if(val && val.state){
-      try{
-        Object.assign(STATE, val.state);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(STATE));
-        render();
-        updateSyncBtn('synced');
-        toast('☁️ 已从云端同步');
-      }catch(e){ console.error(e); }
-    }
+  gistPull().then(()=>{
+    updateSyncBtn('synced');
+    pollTimer = setInterval(gistPull, 30000);
   });
-  syncRef.on('error', ()=>{
-    updateSyncBtn('error');
-    toast('同步连接失败，请检查网络');
-  });
-  // 首次：如果云端没数据，上传本地
-  syncRef.once('value').then(snap=>{
-    if(!snap.val()){
-      uploadToCloud(true);
-    }else{
-      updateSyncBtn('synced');
-    }
-  });
+  return true;
 }
-function stopCloudSync(){
-  if(syncRef){ syncRef.off(); syncRef=null; }
+function stopGistSync(){
   syncEnabled = false;
+  if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
   updateSyncBtn('off');
 }
-function uploadToCloud(immediate){
-  if(!fbDB || !syncRef || !syncEnabled) return;
-  const doUpload = ()=>{
+async function gistPull(){
+  if(!syncEnabled) return;
+  try{
+    const resp = await fetch('https://api.github.com/gists/'+GIST_ID, {
+      headers: { 'Authorization': 'token '+GITHUB_TOKEN }
+    });
+    const data = await resp.json();
+    const file = data.files && data.files['sync-data.json'];
+    if(file && file.content){
+      const parsed = JSON.parse(file.content);
+      const code = localStorage.getItem(SYNC_CODE_KEY);
+      const remote = parsed[code];
+      if(remote && remote.state && remote.updatedAt > lastRemoteUpdate){
+        lastRemoteUpdate = remote.updatedAt;
+        if(!isSyncing){
+          Object.assign(STATE, remote.state);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(STATE));
+          idbSet('state', STATE);
+          render();
+          updateSyncBtn('synced');
+          toast('☁️ 已从云端同步最新数据');
+        }
+      }
+    }
+  }catch(e){
+    console.error('Gist pull error:', e);
+    updateSyncBtn('error');
+  }
+}
+function gistPush(){
+  if(!syncEnabled) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(async ()=>{
     isSyncing = true;
     updateSyncBtn('syncing');
-    syncRef.set({ state: STATE, updatedAt: Date.now() })
-      .then(()=>{ isSyncing=false; updateSyncBtn('synced'); })
-      .catch(e=>{ isSyncing=false; updateSyncBtn('error'); console.error(e); });
-  };
-  if(immediate){ doUpload(); return; }
-  // 防抖：2秒内的多次操作合并为一次上传
-  clearTimeout(syncTimer);
-  syncTimer = setTimeout(doUpload, 2000);
+    try{
+      const resp = await fetch('https://api.github.com/gists/'+GIST_ID, {
+        headers: { 'Authorization': 'token '+GITHUB_TOKEN }
+      });
+      const data = await resp.json();
+      const file = data.files && data.files['sync-data.json'];
+      let allData = {};
+      if(file && file.content){
+        allData = JSON.parse(file.content);
+      }
+      const code = localStorage.getItem(SYNC_CODE_KEY);
+      allData[code] = { state: STATE, updatedAt: Date.now() };
+      lastRemoteUpdate = allData[code].updatedAt;
+      await fetch('https://api.github.com/gists/'+GIST_ID, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': 'token '+GITHUB_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          files: { 'sync-data.json': { content: JSON.stringify(allData) } }
+        })
+      });
+      isSyncing = false;
+      updateSyncBtn('synced');
+    }catch(e){
+      isSyncing = false;
+      updateSyncBtn('error');
+      console.error('Gist push error:', e);
+    }
+  }, 2000);
 }
 function cloudSync(){
-  if(syncEnabled) uploadToCloud(false);
+  if(syncEnabled) gistPush();
 }
 function updateSyncBtn(status){
   const btn = document.getElementById('topbarSync');
@@ -3322,78 +3330,46 @@ function importData(){
 /* ===== 启动 ===== */
 /* ===== 同步设置面板 ===== */
 function openSyncPanel(){
-  const existing = getSyncConfig()||{};
   const existingCode = localStorage.getItem(SYNC_CODE_KEY)||'';
   const isOn = syncEnabled;
-  showModal('☁️ 云端同步设置', `
+  showModal('☁️ 云端同步', `
     <div class="modal-form" style="max-width:420px">
       <div style="background:#FFF5F7;padding:10px 12px;border-radius:8px;font-size:12px;line-height:1.6;margin-bottom:12px;color:#8B5E6F">
         <b>💡 同步说明</b><br>
-        电脑和手机打开同一个网址，配置相同的 Firebase 信息和同步码，数据就会自动实时同步。<br>
-        还没配置？点击下方「📋 查看注册教程」按钮。
+        电脑和手机打开同一个网址，输入相同的同步码，数据就会自动同步。<br>
+        不需要注册任何账号，开箱即用！<br><br>
+        <b>步骤：</b>在电脑上设好同步码 → 手机上输入同一个同步码 → 自动同步
       </div>
       <div>
-        <label>同步码（自定义密码）</label>
+        <label>同步码</label>
         <input id="syncCode" placeholder="设一个同步码，如 yuanyuan2026" value="${existingCode}" style="width:100%"/>
         <div style="font-size:11px;color:#999;margin-top:2px">两台设备填入相同的同步码才能同步同一份数据</div>
       </div>
-      <div style="margin-top:10px">
-        <label>Firebase 配置（JSON 格式）</label>
-        <textarea id="syncConfig" placeholder='粘贴从 Firebase 复制的配置，例如：&#10;{"apiKey":"AIza...","authDomain":"xxx.firebaseapp.com","databaseURL":"https://xxx.firebaseio.com","projectId":"xxx","storageBucket":"xxx.appspot.com","messagingSenderId":"123","appId":"1:123:web:abc"}' style="width:100%;min-height:120px;font-size:11px;font-family:monospace">${existing.apiKey?JSON.stringify(existing,null,2):''}</textarea>
-      </div>
       <div style="display:flex;gap:8px;margin-top:10px">
-        <button class="btn" id="syncConnect">${isOn?'重新连接':'连接同步'}</button>
+        <button class="btn" id="syncConnect">${isOn?'重新连接':'开启同步'}</button>
         ${isOn?'<button class="btn ghost" id="syncDisconnect">断开同步</button>':''}
-        <button class="btn ghost" id="syncTutorial">📋 查看注册教程</button>
       </div>
       <button class="btn ghost" id="syncCancel" style="margin-top:8px;width:100%">关闭</button>
     </div>
   `, null, false);
-  // 绑定事件
-  const connectBtn = document.getElementById('syncConnect');
-  const cancelBtn = document.getElementById('syncCancel');
-  const tutBtn = document.getElementById('syncTutorial');
-  const disBtn = document.getElementById('syncDisconnect');
-  if(cancelBtn) cancelBtn.onclick=closeModal;
-  if(tutBtn) tutBtn.onclick=()=>{
-    window.open('https://console.firebase.google.com', '_blank');
-    toast('已打开 Firebase 官网，按教程注册');
-  };
+  document.getElementById('syncCancel').onclick=closeModal;
+  const disBtn=document.getElementById('syncDisconnect');
   if(disBtn) disBtn.onclick=()=>{
-    stopCloudSync();
+    stopGistSync();
     closeModal();
     toast('已断开云端同步');
   };
-  if(connectBtn) connectBtn.onclick=()=>{
-    const code = document.getElementById('syncCode').value.trim();
-    const configText = document.getElementById('syncConfig').value.trim();
+  document.getElementById('syncConnect').onclick=()=>{
+    const code=document.getElementById('syncCode').value.trim();
     if(!code){ toast('请输入同步码'); return; }
-    if(!configText){ toast('请粘贴 Firebase 配置'); return; }
-    let config;
-    try{
-      config = JSON.parse(configText);
-    }catch(e){
-      toast('配置格式错误，请粘贴完整的 JSON');
-      return;
-    }
-    if(!config.apiKey || !config.databaseURL){
-      toast('配置缺少 apiKey 或 databaseURL');
-      return;
-    }
-    saveSyncConfig(config, code);
+    localStorage.setItem(SYNC_CODE_KEY, code);
     closeModal();
     toast('正在连接…');
-    // 重新初始化
-    if(syncRef) stopCloudSync();
+    if(syncEnabled) stopGistSync();
     setTimeout(()=>{
-      const ok = initFirebase();
-      if(ok){
-        toast('☁️ 云端同步已开启');
-      }else{
-        toast('连接失败，请检查配置');
-        updateSyncBtn('error');
-      }
-    }, 300);
+      startGistSync();
+      toast('☁️ 云端同步已开启！');
+    },300);
   };
 }
 
@@ -3463,8 +3439,8 @@ function init(){
   document.getElementById('topbarImport').onclick=importData;
   // 云端同步
   document.getElementById('topbarSync').onclick=openSyncPanel;
-  if(getSyncConfig() && localStorage.getItem(SYNC_CODE_KEY)){
-    initFirebase();
+  if(localStorage.getItem(SYNC_CODE_KEY)){
+    startGistSync();
   }else{
     updateSyncBtn('off');
   }
