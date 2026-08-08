@@ -1069,6 +1069,45 @@ function load(){
 }
 
 /* ===== GitHub Gist 云端同步 ===== */
+/* 创建精简同步数据（排除 base64 图片/文件，防止超过 Gist 1MB 限制） */
+function getSyncState(){
+  const sync = JSON.parse(JSON.stringify(STATE));
+  if(sync.quickTransfers){
+    sync.quickTransfers = sync.quickTransfers.map(qt=>{
+      const s={...qt}; delete s.fileData; delete s.images; return s;
+    });
+  }
+  ['reflections','inspirations','snippets'].forEach(key=>{
+    if(sync[key]){
+      sync[key] = sync[key].map(item=>{
+        const s={...item}; if(s.images) s.images=[]; return s;
+      });
+    }
+  });
+  return sync;
+}
+/* 合并远程数据到本地（按 id 去重，保留本地已有数据） */
+function mergeRemoteState(remote){
+  const arrKeys=['tasks','clientTasks','englishWords','reflections','inspirations','periodRecords','weightRecords','scripts','clients','snippets','quickTransfers'];
+  let changed=false;
+  arrKeys.forEach(k=>{
+    if(remote[k]&&Array.isArray(remote[k])){
+      const ids=new Set(STATE[k].map(x=>x.id));
+      remote[k].forEach(item=>{
+        if(item.id&&!ids.has(item.id)){STATE[k].push(item);changed=true;}
+      });
+    }
+  });
+  if(remote.checkins){
+    Object.keys(remote.checkins).forEach(d=>{
+      if(!STATE.checkins[d]){STATE.checkins[d]=remote.checkins[d];changed=true;}
+    });
+  }
+  if(remote.ui){Object.assign(STATE.ui,remote.ui);}
+  if(remote.tradeWords){if(!STATE.tradeWords)STATE.tradeWords=remote.tradeWords;}
+  return changed;
+}
+
 function startGistSync(){
   const code = localStorage.getItem(SYNC_CODE_KEY)||'';
   if(!code) return false;
@@ -1077,6 +1116,8 @@ function startGistSync(){
   gistPull().then(()=>{
     updateSyncBtn('synced');
     pollTimer = setInterval(gistPull, 30000);
+  }).catch(()=>{
+    updateSyncBtn('error');
   });
   return true;
 }
@@ -1085,30 +1126,52 @@ function stopGistSync(){
   if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
   updateSyncBtn('off');
 }
+
+/* 获取 Gist 文件完整内容（处理截断） */
+async function getGistContent(file){
+  if(!file) return '';
+  let content = file.content || '';
+  if(file.truncated && file.raw_url){
+    const rawResp = await fetch(file.raw_url, {
+      headers: { 'Authorization': 'token '+GITHUB_TOKEN }
+    });
+    content = await rawResp.text();
+  }
+  return content;
+}
+
 async function gistPull(){
   if(!syncEnabled) return;
   try{
+    updateSyncBtn('syncing');
     const resp = await fetch('https://api.github.com/gists/'+GIST_ID, {
       headers: { 'Authorization': 'token '+GITHUB_TOKEN }
     });
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
     const data = await resp.json();
     const file = data.files && data.files['sync-data.json'];
-    if(file && file.content){
-      const parsed = JSON.parse(file.content);
-      const code = localStorage.getItem(SYNC_CODE_KEY);
-      const remote = parsed[code];
-      if(remote && remote.state && remote.updatedAt > lastRemoteUpdate){
-        lastRemoteUpdate = remote.updatedAt;
-        if(!isSyncing){
-          Object.assign(STATE, remote.state);
+    if(!file){ updateSyncBtn('synced'); return; }
+
+    const content = await getGistContent(file);
+    if(!content){ updateSyncBtn('synced'); return; }
+
+    const parsed = JSON.parse(content);
+    const code = localStorage.getItem(SYNC_CODE_KEY);
+    const remote = parsed[code];
+    if(remote && remote.state){
+      const remoteTime = remote.updatedAt || 0;
+      if(remoteTime > lastRemoteUpdate){
+        lastRemoteUpdate = remoteTime;
+        const changed = mergeRemoteState(remote.state);
+        if(changed){
           localStorage.setItem(STORAGE_KEY, JSON.stringify(STATE));
-          idbSet('state', STATE);
+          idbWrite(JSON.stringify(STATE));
           render();
-          updateSyncBtn('synced');
-          toast('☁️ 已从云端同步最新数据');
+          toast('☁️ 已从云端同步新数据');
         }
       }
     }
+    updateSyncBtn('synced');
   }catch(e){
     console.error('Gist pull error:', e);
     updateSyncBtn('error');
@@ -1124,16 +1187,23 @@ function gistPush(){
       const resp = await fetch('https://api.github.com/gists/'+GIST_ID, {
         headers: { 'Authorization': 'token '+GITHUB_TOKEN }
       });
+      if(!resp.ok) throw new Error('HTTP '+resp.status);
       const data = await resp.json();
       const file = data.files && data.files['sync-data.json'];
+
       let allData = {};
-      if(file && file.content){
-        allData = JSON.parse(file.content);
+      if(file){
+        const content = await getGistContent(file);
+        if(content){
+          allData = JSON.parse(content);
+        }
       }
+
       const code = localStorage.getItem(SYNC_CODE_KEY);
-      allData[code] = { state: STATE, updatedAt: Date.now() };
+      allData[code] = { state: getSyncState(), updatedAt: Date.now() };
       lastRemoteUpdate = allData[code].updatedAt;
-      await fetch('https://api.github.com/gists/'+GIST_ID, {
+
+      const pushResp = await fetch('https://api.github.com/gists/'+GIST_ID, {
         method: 'PATCH',
         headers: {
           'Authorization': 'token '+GITHUB_TOKEN,
@@ -1143,12 +1213,15 @@ function gistPush(){
           files: { 'sync-data.json': { content: JSON.stringify(allData) } }
         })
       });
+      if(!pushResp.ok) throw new Error('HTTP '+pushResp.status);
+
       isSyncing = false;
       updateSyncBtn('synced');
     }catch(e){
       isSyncing = false;
       updateSyncBtn('error');
       console.error('Gist push error:', e);
+      toast('⚠️ 同步失败：'+e.message);
     }
   }, 2000);
 }
@@ -3379,7 +3452,8 @@ function openSyncPanel(){
       <div style="background:#FFF5F7;padding:10px 12px;border-radius:8px;font-size:12px;line-height:1.6;margin-bottom:12px;color:#8B5E6F">
         <b>💡 同步说明</b><br>
         电脑和手机打开同一个网址，输入相同的同步码，数据就会自动同步。<br>
-        不需要注册任何账号，开箱即用！<br><br>
+        <b>文字、待办、单词、记录</b>等内容会同步到云端。<br>
+        <b>图片和文件</b>因体积较大，仅保存在本设备，不同步到云端。<br><br>
         <b>步骤：</b>在电脑上设好同步码 → 手机上输入同一个同步码 → 自动同步
       </div>
       <div>
@@ -3389,7 +3463,8 @@ function openSyncPanel(){
       </div>
       <div style="display:flex;gap:8px;margin-top:10px">
         <button class="btn" id="syncConnect">${isOn?'重新连接':'开启同步'}</button>
-        ${isOn?'<button class="btn ghost" id="syncDisconnect">断开同步</button>':''}
+        ${isOn?'<button class="btn ghost" id="syncForceSync">立即同步</button>':''}
+        ${isOn?'<button class="btn ghost" id="syncDisconnect">断开</button>':''}
       </div>
       <button class="btn ghost" id="syncCancel" style="margin-top:8px;width:100%">关闭</button>
     </div>
@@ -3400,6 +3475,13 @@ function openSyncPanel(){
     stopGistSync();
     closeModal();
     toast('已断开云端同步');
+  };
+  const forceBtn=document.getElementById('syncForceSync');
+  if(forceBtn) forceBtn.onclick=()=>{
+    closeModal();
+    toast('正在同步…');
+    gistPush();
+    setTimeout(()=>gistPull(), 1500);
   };
   document.getElementById('syncConnect').onclick=()=>{
     const code=document.getElementById('syncCode').value.trim();
